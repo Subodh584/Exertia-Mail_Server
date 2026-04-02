@@ -60,14 +60,19 @@ if ! command -v cloudflared &> /dev/null; then
     exit 1
 fi
 
+# Use a local log file — Termux (and some Linux envs) block writes to /tmp
+CF_LOG="$SCRIPT_DIR/.cf_out.txt"
+SB_RESP="$SCRIPT_DIR/.sb_resp.txt"
+
 # ── 5. Cleanup on exit ────────────────────────────────────────────────────────
 cleanup() {
     echo ""
-    echo "🛑  Shutting down…"
-    [ -n "$SERVER_PID"  ] && kill "$SERVER_PID"  2>/dev/null
-    [ -n "$TUNNEL_PID"  ] && kill "$TUNNEL_PID"  2>/dev/null
-    [ -f /tmp/cf_out.txt ] && rm /tmp/cf_out.txt
-    echo "✅  All processes stopped."
+    echo "Shutting down..."
+    [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null
+    [ -n "$TUNNEL_PID" ] && kill "$TUNNEL_PID" 2>/dev/null
+    [ -f "$CF_LOG"  ] && rm -f "$CF_LOG"
+    [ -f "$SB_RESP" ] && rm -f "$SB_RESP"
+    echo "All processes stopped."
     exit 0
 }
 trap cleanup SIGINT SIGTERM
@@ -87,7 +92,7 @@ echo "✅  Node server running (PID $SERVER_PID)"
 
 # ── 7. Start Cloudflare tunnel ─────────────────────────────────────────────────
 echo "🌐  Starting Cloudflare tunnel…"
-cloudflared tunnel --url "http://localhost:$PORT" > /tmp/cf_out.txt 2>&1 &
+cloudflared tunnel --url "http://localhost:$PORT" > "$CF_LOG" 2>&1 &
 TUNNEL_PID=$!
 
 # ── 8. Watch for the tunnel URL and push it to Supabase ──────────────────────
@@ -95,7 +100,7 @@ echo "⏳  Waiting for tunnel URL…"
 TUNNEL_URL=""
 for i in $(seq 1 30); do
     sleep 1
-    TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' /tmp/cf_out.txt | head -1)
+    TUNNEL_URL=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$CF_LOG" 2>/dev/null | head -1)
     if [ -n "$TUNNEL_URL" ]; then
         break
     fi
@@ -104,7 +109,7 @@ done
 if [ -z "$TUNNEL_URL" ]; then
     echo ""
     echo "⚠️   Could not detect tunnel URL after 30s."
-    echo "     Check /tmp/cf_out.txt for cloudflared output."
+    echo "     Check .cf_out.txt in the mailServer folder for cloudflared output."
     echo "     Update the url column in Supabase mail_url table manually."
 else
     echo ""
@@ -113,7 +118,7 @@ else
     # Push URL to Supabase via REST API
     if [ -n "$SUPABASE_URL" ] && [ -n "$SUPABASE_SERVICE_ROLE_KEY" ]; then
         echo "📡  Updating mail_url in Supabase…"
-        HTTP_STATUS=$(curl -s -o /tmp/sb_resp.txt -w "%{http_code}" \
+        HTTP_STATUS=$(curl -s -o "$SB_RESP" -w "%{http_code}" \
             -X PATCH \
             "${SUPABASE_URL}/rest/v1/mail_url?id=eq.1" \
             -H "apikey: ${SUPABASE_SERVICE_ROLE_KEY}" \
@@ -126,7 +131,7 @@ else
             echo "✅  Supabase mail_url updated → $TUNNEL_URL"
         else
             echo "⚠️   Supabase update returned HTTP $HTTP_STATUS"
-            echo "     Response: $(cat /tmp/sb_resp.txt)"
+            echo "     Response: $(cat "$SB_RESP" 2>/dev/null)"
             echo "     Update manually: set url = '$TUNNEL_URL' in the mail_url table."
         fi
     else
@@ -145,5 +150,5 @@ echo "────────────────────────�
 echo ""
 
 # ── 9. Stream logs from both processes ────────────────────────────────────────
-tail -f /tmp/cf_out.txt &
+tail -f "$CF_LOG" 2>/dev/null &
 wait "$SERVER_PID"
